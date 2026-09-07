@@ -1,0 +1,17 @@
+black==26.5.1
+click==8.5.0
+ImageHash==4.3.2
+iniconfig==2.3.0
+mypy_extensions==1.1.0
+numpy==2.5.3
+packaging==26.3
+pathspec==1.1.1
+pillow==12.3.0
+platformdirs==4.11.7
+pluggy==1.6.0
+Pygments==2.21.0
+pytest==8.4.2
+pytokens==0.4.1
+PyWavelets==1.9.0
+PyYAML==6.0.3
+scipy==1.18.1
