@@ -1,0 +1,25 @@
+project_name: dev-proj
+data:
+    target_size: 512
+    format: png
+    build_id: "001"
+    dedup:
+        exact: true
+        perceptual_threshold: 4
+training:
+    batch_size: 8
+    aug_prob: 0.25
+    network_capacity: 16
+    num_train_steps: 10000
+    gradient_accumulate_every: 2
+    num_workers: 8
+    model_id: "dev-512"
+generate:
+    catalog_id: "512-001"
+    catalog_size: 64
+    trunc_psi: 0.7
+    interp_id: "walk-512-01"
+    keyframes: [0, 1]
+    frames_per_leg: 48
+    fps: 24
+    video_name: "walk-512-01"
