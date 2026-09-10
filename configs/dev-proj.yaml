@@ -7,13 +7,15 @@ data:
         exact: true
         perceptual_threshold: 4
 training:
-    batch_size: 8
-    aug_prob: 0.25
-    network_capacity: 16
-    num_train_steps: 10000
-    gradient_accumulate_every: 2
-    num_workers: 8
     model_id: "dev-512"
+    batch_size: 8
+    microbatch: 4
+    num_train_steps: 10000
+    num_workers: 8
+    precision: bf16
+    mirror: true
+    compile_main: false
+    cache_npy: false
 generate:
     catalog_id: "512-001"
     catalog_size: 64

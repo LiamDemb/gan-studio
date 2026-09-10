@@ -47,7 +47,9 @@ def main():
         latent_path = catalog_dir / f"{keyframe_id:04d}.pt"
         if not latent_path.is_file():
             raise SystemExit(f"Missing catalog latent: {latent_path}")
-        latent = torch.load(latent_path, map_location="cuda", weights_only=True)
+        latent = torch.load(latent_path, map_location="cpu", weights_only=True)
+        if torch.cuda.is_available():
+            latent = latent.cuda()
         styles.append(generator.latent_to_style(latent, trunc_psi=trunc_psi))
 
     interp_dir.mkdir(parents=True, exist_ok=True)
