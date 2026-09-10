@@ -14,7 +14,11 @@ training:
     gradient_accumulate_every: 4
     model_id: "dev"
 generate:
+    catalog_id: "001"
     catalog_size: 64
     trunc_psi: 0.7
+    interp_id: "walk-01"
     keyframes: [0, 1, 2, 3, 4]
     frames_per_leg: 48
+    fps: 24
+    video_name: "walk-01"

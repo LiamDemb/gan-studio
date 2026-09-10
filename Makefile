@@ -1,4 +1,4 @@
-.PHONY: ingest train generate catalog interpolate test
+.PHONY: ingest train generate catalog interpolate video test
 
 export PYTHONPATH := src
 
@@ -16,6 +16,9 @@ catalog:
 
 interpolate:
 	python3 scripts/interpolate.py --config $(CONFIG)
+
+video:
+	python3 scripts/video.py --config $(CONFIG)
 
 test:
 	python3 -m pytest tests -q

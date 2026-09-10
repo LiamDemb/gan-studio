@@ -6,13 +6,14 @@ import torch
 from torchvision.utils import save_image
 
 from gan_studio import ArtGenerator
-from gan_studio.utils import open_config, parse_config_arg
+from gan_studio.utils import open_config, parse_config_arg, require_id
 
 
 def main():
     args = parse_config_arg()
     config = open_config(args.config)
     generate_cfg = config.get("generate") or {}
+    catalog_id = require_id(generate_cfg, "catalog_id")
     try:
         catalog_size = int(generate_cfg["catalog_size"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -22,18 +23,16 @@ def main():
     if catalog_size < 1:
         raise SystemExit("generate.catalog_size must be at least 1")
     trunc_psi = float(generate_cfg.get("trunc_psi", 0.7))
+    model_id = str(config["training"]["model_id"])
 
     project_dir = Path("projects") / config["project_name"]
-    catalog_dir = project_dir / "results" / "catalog"
+    catalog_dir = project_dir / "results" / "catalog" / catalog_id
     catalog_dir.mkdir(parents=True, exist_ok=True)
     for path in catalog_dir.iterdir():
         if path.is_file():
             path.unlink()
 
-    generator = ArtGenerator(
-        base_dir=project_dir,
-        name=str(config["training"]["model_id"]),
-    )
+    generator = ArtGenerator(base_dir=project_dir, name=model_id)
 
     items = []
     print(f"Writing {catalog_size} catalog samples to {catalog_dir}")
@@ -54,7 +53,10 @@ def main():
         print(f"  {png_name}")
 
     manifest = {
-        "model_id": str(config["training"]["model_id"]),
+        "project_name": config["project_name"],
+        "build_id": str(config["data"]["build_id"]),
+        "model_id": model_id,
+        "catalog_id": catalog_id,
         "trunc_psi": trunc_psi,
         "count": catalog_size,
         "items": items,

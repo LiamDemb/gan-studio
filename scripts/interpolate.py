@@ -6,7 +6,7 @@ import torch
 from torchvision.utils import save_image
 
 from gan_studio import ArtGenerator
-from gan_studio.utils import open_config, parse_config_arg
+from gan_studio.utils import open_config, parse_config_arg, require_id
 
 
 def main():
@@ -14,32 +14,34 @@ def main():
     config = open_config(args.config)
     generate_cfg = config.get("generate") or {}
 
+    catalog_id = require_id(generate_cfg, "catalog_id")
+    interp_id = require_id(generate_cfg, "interp_id")
     keyframes = _keyframes(generate_cfg)
     frames_per_leg = _frames_per_leg(generate_cfg)
 
     project_dir = Path("projects") / config["project_name"]
-    catalog_dir = project_dir / "results" / "catalog"
-    interp_dir = project_dir / "results" / "interp"
-    manifest_path = catalog_dir / "catalog.json"
-    if not manifest_path.is_file():
+    catalog_dir = project_dir / "results" / "catalog" / catalog_id
+    interp_dir = project_dir / "results" / "interp" / interp_id
+    catalog_manifest_path = catalog_dir / "catalog.json"
+    if not catalog_manifest_path.is_file():
         raise SystemExit(
-            f"Catalog not found at {manifest_path}. Run make catalog first."
+            f"Catalog not found at {catalog_manifest_path}. Run make catalog first."
         )
 
-    manifest = json.loads(manifest_path.read_text())
-    trunc_psi = float(manifest.get("trunc_psi", generate_cfg.get("trunc_psi", 0.7)))
-    known_ids = {int(item["id"]) for item in manifest.get("items", [])}
-
-    generator = ArtGenerator(
-        base_dir=project_dir,
-        name=str(config["training"]["model_id"]),
+    catalog_manifest = json.loads(catalog_manifest_path.read_text())
+    trunc_psi = float(
+        catalog_manifest.get("trunc_psi", generate_cfg.get("trunc_psi", 0.7))
     )
+    model_id = str(catalog_manifest.get("model_id") or config["training"]["model_id"])
+    known_ids = {int(item["id"]) for item in catalog_manifest.get("items", [])}
+
+    generator = ArtGenerator(base_dir=project_dir, name=model_id)
 
     styles = []
     for keyframe_id in keyframes:
         if known_ids and keyframe_id not in known_ids:
             raise SystemExit(
-                f"Keyframe {keyframe_id} is not in the catalog. "
+                f"Keyframe {keyframe_id} is not in catalog {catalog_id}. "
                 f"Choose ids from 0 to {max(known_ids)}"
             )
         latent_path = catalog_dir / f"{keyframe_id:04d}.pt"
@@ -54,7 +56,7 @@ def main():
             path.unlink()
 
     print(
-        f"Interpolating keyframes {keyframes} "
+        f"Interpolating catalog {catalog_id} keyframes {keyframes} "
         f"({frames_per_leg} frames per leg) -> {interp_dir}"
     )
     frame_count = 0
@@ -63,7 +65,22 @@ def main():
         save_image(image, output_path)
         frame_count += 1
 
-    print(f"Interpolate complete. {frame_count} frames in {interp_dir}")
+    interp_manifest = {
+        "project_name": config["project_name"],
+        "build_id": str(catalog_manifest.get("build_id") or config["data"]["build_id"]),
+        "model_id": model_id,
+        "catalog_id": catalog_id,
+        "interp_id": interp_id,
+        "trunc_psi": trunc_psi,
+        "keyframes": keyframes,
+        "frames_per_leg": frames_per_leg,
+        "frame_count": frame_count,
+    }
+    interp_manifest_path = interp_dir / "interp.json"
+    interp_manifest_path.write_text(json.dumps(interp_manifest, indent=2) + "\n")
+    print(
+        f"Interpolate complete. {frame_count} frames. Manifest {interp_manifest_path}"
+    )
 
 
 def _keyframes(generate_cfg):
