@@ -58,20 +58,18 @@ def center_crop_to_aspect(
     return img
 
 
-def resize_to_target(
-    img: Image.Image, target_w: int, target_h: int
-) -> Image.Image | None:
-    cropped = center_crop_to_aspect(img, target_w, target_h)
+def resize_to_target(img: Image.Image, target_size: int) -> Image.Image | None:
+    cropped = center_crop_to_aspect(img, target_size, target_size)
     crop_w, crop_h = cropped.size
-    if crop_w < target_w or crop_h < target_h:
+    if crop_w < target_size or crop_h < target_size:
         return None
-    if (crop_w, crop_h) == (target_w, target_h):
+    if (crop_w, crop_h) == (target_size, target_size):
         return cropped
-    return cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    return cropped.resize((target_size, target_size), Image.Resampling.LANCZOS)
 
 
 def validate_images(config: dict, paths: list[Path]) -> IngestResult:
-    target_w, target_h = _target_size(config)
+    target_size = _target_size(config)
     exact_dedup, perceptual_threshold = _dedup_settings(config)
 
     base_dir = (
@@ -137,7 +135,7 @@ def validate_images(config: dict, paths: list[Path]) -> IngestResult:
             )
             continue
 
-        fitted = resize_to_target(rgb, target_w, target_h)
+        fitted = resize_to_target(rgb, target_size)
         if fitted is None:
             rows.append(
                 _row(
@@ -157,8 +155,8 @@ def validate_images(config: dict, paths: list[Path]) -> IngestResult:
         rows.append(
             _row(
                 filename=output_name,
-                width=target_w,
-                height=target_h,
+                width=target_size,
+                height=target_size,
                 status="valid",
                 reason="ok",
                 source_path=path,
@@ -225,18 +223,17 @@ def _suffixes_for(fmt: str) -> set[str]:
     return {f".{fmt}"}
 
 
-def _target_size(config: dict) -> tuple[int, int]:
+def _target_size(config: dict) -> int:
     data = config["data"]
     try:
-        width = int(data["target_width"])
-        height = int(data["target_height"])
+        size = int(data["target_size"])
     except (KeyError, TypeError, ValueError) as exc:
+        raise IngestError("config data.target_size must be an integer") from exc
+    if size < 4 or (size & (size - 1)) != 0:
         raise IngestError(
-            "config data.target_width and data.target_height must be integers"
-        ) from exc
-    if width < 1 or height < 1:
-        raise IngestError("target_width and target_height must be positive")
-    return width, height
+            "data.target_size must be a power of two >= 4 (e.g. 256, 512, 1024)"
+        )
+    return size
 
 
 def _dedup_settings(config: dict) -> tuple[bool, int | None]:

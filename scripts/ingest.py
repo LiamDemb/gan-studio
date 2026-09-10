@@ -1,18 +1,11 @@
-import argparse
 import sys
 
 from gan_studio.data import IngestError, find_images, validate_images
-from gan_studio.utils import open_config, write_resolved_config
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
-    return parser.parse_args()
+from gan_studio.utils import open_config, write_resolved_config, parse_config_arg
 
 
 def main():
-    args = parse_args()
+    args = parse_config_arg()
     config = open_config(args.config)
 
     print("Ingesting images...")

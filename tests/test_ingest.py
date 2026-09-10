@@ -90,14 +90,21 @@ def test_center_crop_keeps_the_middle_of_a_wide_image():
 
 def test_resize_to_target_rejects_images_that_would_upscale():
     img = Image.new("RGB", (40, 50), (9, 9, 9))
-    assert resize_to_target(img, 64, 80) is None
+    assert resize_to_target(img, 64) is None
 
 
-def test_resize_to_target_supports_non_square_output():
+def test_resize_to_target_downscales_to_square():
     img = Image.new("RGB", (128, 160), (9, 9, 9))
-    fitted = resize_to_target(img, 64, 80)
+    fitted = resize_to_target(img, 64)
     assert fitted is not None
-    assert fitted.size == (64, 80)
+    assert fitted.size == (64, 64)
+
+
+def test_resize_to_target_keeps_exact_square():
+    img = Image.new("RGB", (64, 64), (9, 9, 9))
+    fitted = resize_to_target(img, 64)
+    assert fitted is not None
+    assert fitted.size == (64, 64)
 
 
 def test_validate_crops_resizes_and_writes_outputs(tmp_path, monkeypatch):
@@ -113,9 +120,9 @@ def test_validate_crops_resizes_and_writes_outputs(tmp_path, monkeypatch):
     assert rows[0]["status"] == "valid"
     assert rows[0]["reason"] == "ok"
     assert rows[0]["width"] == "64"
-    assert rows[0]["height"] == "80"
+    assert rows[0]["height"] == "64"
     output = Image.open(result.base_dir / "images" / "0000.png")
-    assert output.size == (64, 80)
+    assert output.size == (64, 64)
     assert output.mode == "RGB"
 
 
@@ -204,7 +211,7 @@ def test_validate_flattens_transparent_png_on_white(tmp_path, monkeypatch):
     out = Image.open(result.base_dir / "images" / "0000.png")
     # After crop/resize the red pixel should still sit on a white background.
     assert out.mode == "RGB"
-    corners = [out.getpixel((0, 0)), out.getpixel((63, 0)), out.getpixel((0, 79))]
+    corners = [out.getpixel((0, 0)), out.getpixel((63, 0)), out.getpixel((0, 63))]
     assert all(pixel == (255, 255, 255) for pixel in corners)
 
 
@@ -213,7 +220,17 @@ def test_missing_target_size_raises(tmp_path, monkeypatch):
     raw = make_raw_dir(tmp_path)
     save_rgb(raw / "a.png", (80, 100))
     config = sample_config()
-    del config["data"]["target_width"]
+    del config["data"]["target_size"]
 
-    with pytest.raises(IngestError, match="target_width"):
+    with pytest.raises(IngestError, match="target_size"):
+        validate_images(config, find_images(config))
+
+
+def test_non_power_of_two_target_size_raises(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    raw = make_raw_dir(tmp_path)
+    save_rgb(raw / "a.png", (80, 100))
+    config = sample_config(target_size=100)
+
+    with pytest.raises(IngestError, match="power of two"):
         validate_images(config, find_images(config))

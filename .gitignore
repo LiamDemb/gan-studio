@@ -7,4 +7,4 @@ build/
 
 /projects
 .venv/
-/configs
+configs/dev.yaml

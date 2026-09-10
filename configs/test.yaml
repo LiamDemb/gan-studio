@@ -1,0 +1,24 @@
+project_name: dev-proj
+data:
+    target_size: 1024
+    format: png
+    build_id: "001"
+    dedup:
+        exact: true
+        perceptual_threshold: 4
+training:
+    batch_size: 4
+    aug_prob: 0.25
+    network_capacity: 16
+    num_train_steps: 10000
+    gradient_accumulate_every: 4
+    model_id: "dev"
+generate:
+    catalog_id: "001"
+    catalog_size: 64
+    trunc_psi: 0.7
+    interp_id: "walk-01"
+    keyframes: [0, 1, 2, 3, 4]
+    frames_per_leg: 48
+    fps: 24
+    video_name: "walk-01"

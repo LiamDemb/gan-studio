@@ -3,8 +3,7 @@ from PIL import Image, ImageDraw
 
 def sample_config(**data_overrides):
     data = {
-        "target_width": 64,
-        "target_height": 80,
+        "target_size": 64,
         "format": "png",
         "build_id": "001",
         "dedup": {"exact": True, "perceptual_threshold": 4},

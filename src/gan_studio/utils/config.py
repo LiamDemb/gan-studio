@@ -1,6 +1,6 @@
 from pathlib import Path
-
 import yaml
+import argparse
 
 
 def open_config(path):
@@ -21,3 +21,21 @@ def write_resolved_config(config, output_dir: Path):
 
     print(f"Written resolved config to {resolved_path}")
     return resolved_path
+
+
+def parse_config_arg():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    return parser.parse_args()
+
+
+def require_id(mapping, key, *, section="generate"):
+    try:
+        value = str(mapping[key]).strip()
+    except (KeyError, TypeError) as exc:
+        raise SystemExit(f"config {section}.{key} is required") from exc
+    if not value:
+        raise SystemExit(f"config {section}.{key} must be a non-empty id")
+    if Path(value).name != value:
+        raise SystemExit(f"config {section}.{key} must be a simple id, not a path")
+    return value
