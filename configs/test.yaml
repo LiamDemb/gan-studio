@@ -16,3 +16,5 @@ training:
 generate:
     catalog_size: 64
     trunc_psi: 0.7
+    keyframes: [0, 1, 2, 3, 4]
+    frames_per_leg: 48

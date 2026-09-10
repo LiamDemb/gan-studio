@@ -1,4 +1,4 @@
-.PHONY: ingest train generate catalog test
+.PHONY: ingest train generate catalog interpolate test
 
 export PYTHONPATH := src
 
@@ -13,6 +13,9 @@ generate:
 
 catalog:
 	python3 scripts/catalog.py --config $(CONFIG)
+
+interpolate:
+	python3 scripts/interpolate.py --config $(CONFIG)
 
 test:
 	python3 -m pytest tests -q

@@ -31,3 +31,15 @@ class ArtGenerator:
         z = self.random_latent(seed=seed)
         style = self.latent_to_style(z, trunc_psi)
         return self.style_to_image(style), z
+
+    def interpolate_styles(self, styles, frames_per_leg):
+        if len(styles) < 2:
+            raise ValueError("Need at least two styles to interpolate")
+        if frames_per_leg < 1:
+            raise ValueError("frames_per_leg must be at least 1")
+
+        for start, end in zip(styles, styles[1:]):
+            for step in range(frames_per_leg):
+                t = step / frames_per_leg
+                yield self.style_to_image(start * (1 - t) + end * t)
+        yield self.style_to_image(styles[-1])
