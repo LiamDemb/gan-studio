@@ -1,6 +1,6 @@
 from pathlib import Path
-
 import yaml
+import argparse
 
 
 def open_config(path):
@@ -21,3 +21,9 @@ def write_resolved_config(config, output_dir: Path):
 
     print(f"Written resolved config to {resolved_path}")
     return resolved_path
+
+
+def parse_config_arg():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    return parser.parse_args()
