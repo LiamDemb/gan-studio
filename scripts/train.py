@@ -23,6 +23,7 @@ def main():
         "--network-capacity": config["training"]["network_capacity"],
         "--num-train-steps": config["training"]["num_train_steps"],
         "--gradient_accumulate_every": config["training"]["gradient_accumulate_every"],
+        "--num-workers": config["training"]["num_workers"],
         "--models_dir": Path("projects") / config["project_name"] / "models",
         "--results_dir": Path("projects") / config["project_name"] / "results",
     }

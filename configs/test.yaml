@@ -12,6 +12,7 @@ training:
     network_capacity: 16
     num_train_steps: 10000
     gradient_accumulate_every: 4
+    num_workers: 4
     model_id: "dev"
 generate:
     catalog_id: "001"
