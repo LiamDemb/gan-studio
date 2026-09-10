@@ -1,4 +1,4 @@
-.PHONY: ingest train generate test
+.PHONY: ingest train generate catalog test
 
 export PYTHONPATH := src
 
@@ -10,6 +10,9 @@ train:
 
 generate:
 	python3 scripts/generate.py --config $(CONFIG)
+
+catalog:
+	python3 scripts/catalog.py --config $(CONFIG)
 
 test:
 	python3 -m pytest tests -q

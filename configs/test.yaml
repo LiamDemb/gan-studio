@@ -13,3 +13,6 @@ training:
     num_train_steps: 10000
     gradient_accumulate_every: 4
     model_id: "dev"
+generate:
+    catalog_size: 64
+    trunc_psi: 0.7
