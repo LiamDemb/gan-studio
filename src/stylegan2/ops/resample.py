@@ -7,9 +7,10 @@ The symmetric filter makes correlation and convolution equivalent.
 
 import torch
 from torch.nn import functional as F
+from .conv_grad import conv2d
 
 
-def resample(x, up=1, down=1, left=1, right=2, backend="torch"):
+def resample(x, up=1, down=1, left=1, right=2, backend="torch", conv_backend="native"):
     if x.ndim != 4 or up not in (1, 2) or down not in (1, 2):
         raise ValueError("Expected NCHW and up/down in {1,2}")
     if left < 0 or right < 0:
@@ -37,16 +38,20 @@ def resample(x, up=1, down=1, left=1, right=2, backend="torch"):
     with torch.autocast(
         device_type="cpu" if x.device.type == "meta" else x.device.type, enabled=False
     ):
-        return F.conv2d(x, kernel, stride=down, groups=c)
+        return conv2d(x, kernel, stride=down, groups=c, backend=conv_backend)
 
 
-def upsample(x, backend="torch"):
-    return resample(x, up=2, left=2, right=1, backend=backend)
+def upsample(x, backend="torch", conv_backend="native"):
+    return resample(
+        x, up=2, left=2, right=1, backend=backend, conv_backend=conv_backend
+    )
 
 
-def downsample(x, backend="torch"):
-    return resample(x, down=2, left=1, right=1, backend=backend)
+def downsample(x, backend="torch", conv_backend="native"):
+    return resample(
+        x, down=2, left=1, right=1, backend=backend, conv_backend=conv_backend
+    )
 
 
-def blur(x, backend="torch"):
-    return resample(x, left=1, right=2, backend=backend)
+def blur(x, backend="torch", conv_backend="native"):
+    return resample(x, left=1, right=2, backend=backend, conv_backend=conv_backend)

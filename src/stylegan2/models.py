@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .ops import modulated_conv2d, upsample, downsample, blur
+from .ops.conv_grad import conv2d
 
 
 @dataclass(frozen=True)
@@ -96,16 +97,21 @@ class StyledConv(nn.Module):
                 "noise_const", torch.randn(1, 1, resolution, resolution)
             )
 
-    def forward(self, x, w, noise_mode="random"):
+    def forward(self, x, w, noise_mode="random", conv_backend="native"):
         with torch.autocast(
             device_type="cpu" if w.device.type == "meta" else w.device.type,
             enabled=False,
         ):
             style = self.affine(w)
         if self.up:
-            x = upsample(x, self.resample)
+            x = upsample(x, self.resample, conv_backend)
         x = modulated_conv2d(
-            x, self.weight * self.gain, style, not self.rgb, self.modconv
+            x,
+            self.weight * self.gain,
+            style,
+            not self.rgb,
+            self.modconv,
+            conv_backend=conv_backend,
         )
         if not self.rgb:
             if noise_mode == "random":
@@ -149,17 +155,20 @@ class Synthesis(nn.Module):
                 )
             )
 
-    def forward(self, ws, noise_mode="random"):
+    def forward(self, ws, noise_mode="random", conv_backend="native"):
         if ws.ndim != 3 or ws.shape[1] != self.num_ws or ws.shape[2] != self.cfg.w_dim:
             raise ValueError("ws must be [batch, num_ws, w_dim]")
         x = self.constant.expand(ws.shape[0], -1, -1, -1)
-        x = self.first(x, ws[:, 0], noise_mode)
-        rgb = self.first_rgb(x, ws[:, 1]).float()
+        x = self.first(x, ws[:, 0], noise_mode, conv_backend)
+        rgb = self.first_rgb(x, ws[:, 1], conv_backend=conv_backend).float()
         slot = 1
         for conv_up, conv, to_rgb in self.blocks:
-            x = conv_up(x, ws[:, slot], noise_mode)
-            x = conv(x, ws[:, slot + 1], noise_mode)
-            rgb = upsample(rgb, self.cfg.resample) + to_rgb(x, ws[:, slot + 2]).float()
+            x = conv_up(x, ws[:, slot], noise_mode, conv_backend)
+            x = conv(x, ws[:, slot + 1], noise_mode, conv_backend)
+            rgb = (
+                upsample(rgb, self.cfg.resample, conv_backend)
+                + to_rgb(x, ws[:, slot + 2], conv_backend=conv_backend).float()
+            )
             slot += 2
         return rgb
 
@@ -196,8 +205,15 @@ class EqualConv(nn.Module):
         self.gain = 1 / math.sqrt(cin * k * k)
         self.stride, self.pad, self.activate = stride, k // 2, activate
 
-    def forward(self, x):
-        x = F.conv2d(x, self.weight * self.gain, stride=self.stride, padding=self.pad)
+    def forward(self, x, conv_backend="native"):
+        x = conv2d(
+            x,
+            self.weight * self.gain,
+            stride=self.stride,
+            padding=self.pad,
+            backend=conv_backend,
+            weight_independent=True,
+        )
         if self.bias is not None:
             x = x + self.bias.to(x.dtype)[None, :, None, None]
         return F.leaky_relu(x, 0.2) * math.sqrt(2) if self.activate else x
@@ -211,9 +227,11 @@ class DownBlock(nn.Module):
         self.skip = EqualConv(cin, cout, k=1, activate=False, bias=False)
         self.backend = backend
 
-    def forward(self, x):
-        skip = self.skip(downsample(x, self.backend))
-        y = self.conv_down(blur(self.conv(x), self.backend))
+    def forward(self, x, conv_backend="native"):
+        skip = self.skip(downsample(x, self.backend, conv_backend), conv_backend)
+        y = self.conv_down(
+            blur(self.conv(x, conv_backend), self.backend, conv_backend), conv_backend
+        )
         return (y + skip) / math.sqrt(2)
 
 
@@ -245,8 +263,10 @@ class Discriminator(nn.Module):
         self.final_hidden = EqualLinear(c * 4 * 4, c, activate=True)
         self.final_score = EqualLinear(c, 1)
 
-    def forward(self, image):
-        x = self.blocks(self.from_rgb(image))
-        x = self.final_conv(minibatch_std(x, self.cfg.mbstd_group))
+    def forward(self, image, conv_backend="native"):
+        x = self.from_rgb(image, conv_backend)
+        for block in self.blocks:
+            x = block(x, conv_backend)
+        x = self.final_conv(minibatch_std(x, self.cfg.mbstd_group), conv_backend)
         x = self.final_hidden(x.flatten(1))
         return self.final_score(x).float().flatten()

@@ -44,7 +44,8 @@ def test_fused_fir_custom_op_contract():
     )
 
 
-def test_compiled_main_with_fused_fir_and_eager_regularisation():
+@pytest.mark.parametrize("regularizer_conv", ["native", "analytic"])
+def test_compiled_main_with_fused_fir_and_eager_regularisation(regularizer_conv):
     pytest.importorskip("triton")
     from stylegan2 import ModelConfig
     from stylegan2.training import Trainer, TrainConfig
@@ -59,7 +60,13 @@ def test_compiled_main_with_fused_fir_and_eager_regularisation():
             channel_max=32,
             resample="triton",
         ),
-        TrainConfig(precision="bf16", compile_main=True, r1_interval=2, pl_interval=2),
+        TrainConfig(
+            precision="bf16",
+            compile_main=True,
+            r1_interval=2,
+            pl_interval=2,
+            regularizer_conv=regularizer_conv,
+        ),
         "cuda",
     )
     for _ in range(2):

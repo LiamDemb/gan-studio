@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.nn import functional as F
 
 from .models import Generator, Discriminator, ModelConfig
+from .ops.conv_grad import input_derivative_only
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class TrainConfig:
     tf32: bool = False
     microbatch: int = 0
     mirror: bool = False
+    regularizer_conv: str = "native"
 
     def __post_init__(self):
         if self.lr <= 0 or min(self.r1_gamma, self.pl_weight) < 0:
@@ -48,6 +50,8 @@ class TrainConfig:
             raise ValueError("Invalid EMA parameters")
         if self.precision not in ("fp32", "bf16", "fp16") or self.microbatch < 0:
             raise ValueError("Invalid precision or microbatch")
+        if self.regularizer_conv not in ("native", "analytic"):
+            raise ValueError("Invalid regularizer_conv backend")
 
 
 def world_size():
@@ -117,14 +121,16 @@ def lazy_adam(params, lr, interval, enabled, cuda):
 
 
 def r1_penalty(scores, real):
-    (grad,) = torch.autograd.grad(scores.sum(), real, create_graph=True)
+    with input_derivative_only():
+        (grad,) = torch.autograd.grad(scores.sum(), real, create_graph=True)
     return grad.square().flatten(1).sum(1).mean()
 
 
 def path_lengths(images, ws, noise=None):
     if noise is None:
         noise = torch.randn_like(images) / math.sqrt(images.shape[2] * images.shape[3])
-    (grad,) = torch.autograd.grad((images * noise).sum(), ws, create_graph=True)
+    with input_derivative_only():
+        (grad,) = torch.autograd.grad((images * noise).sum(), ws, create_graph=True)
     return (grad.square().sum(2).mean(1) + 1e-8).sqrt()
 
 
@@ -138,10 +144,24 @@ class Trainer:
         if cuda and train.precision == "bf16" and not torch.cuda.is_bf16_supported():
             raise ValueError("This GPU does not support BF16; use fp16 or fp32")
         if cuda:
+            if (
+                os.environ.get("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE") == "1"
+                and not train.tf32
+                or os.environ.get("NVIDIA_TF32_OVERRIDE") == "0"
+                and train.tf32
+            ):
+                raise ValueError(
+                    "TF32 environment override conflicts with requested training policy"
+                )
             torch.backends.cudnn.benchmark = True
+            torch.set_float32_matmul_precision("high" if train.tf32 else "highest")
             torch.backends.cuda.matmul.allow_tf32 = train.tf32
             torch.backends.cudnn.allow_tf32 = train.tf32
         if model.resample == "triton":
+            if not cuda:
+                raise ValueError(
+                    "Triton FIR training requires CUDA; explicitly select resample='torch' on CPU"
+                )
             from .ops import triton_fir  # Register custom ops before compiler tracing.
         self.G, self.D = Generator(model).to(self.device), Discriminator(model).to(
             self.device
@@ -168,6 +188,7 @@ class Trainer:
         )
         self.pl_mean = torch.zeros((), device=self.device)
         self.steps, self.images_seen = 0, 0
+        self.last_load_changes = {}
         self.synth_main = self.G.synthesis
         self.disc_main = self.D
         if train.compile_main:
@@ -203,7 +224,14 @@ class Trainer:
         scaler.step(opt)
         scaler.update()
 
-    def step(self, real):
+    def step(self, real, phase_observer=None):
+        # Optional benchmark callback. No events, synchronisation or profiler
+        # contexts are created by ordinary training when this is absent.
+        def phase(name):
+            if phase_observer is not None:
+                phase_observer(name)
+
+        phase("input")
         cfg = self.cfg
         if real.ndim != 4 or tuple(real.shape[1:]) != (
             3,
@@ -237,6 +265,7 @@ class Trainer:
         do_r1 = cfg.r1_gamma > 0 and (self.steps + 1) % cfg.r1_interval == 0
         do_pl = cfg.pl_weight > 0 and (self.steps + 1) % cfg.pl_interval == 0
 
+        phase("d_main")
         self.G.requires_grad_(False)
         self.D.requires_grad_(True)
         self.g_opt.zero_grad(set_to_none=True)
@@ -256,16 +285,20 @@ class Trainer:
         self.finish_phase(self.d_opt, self.d_scaler, self.D.parameters())
 
         if do_r1:
+            phase("r1")
             self.d_opt.zero_grad(set_to_none=True)
             for chunk in chunks:
                 # Both forward and higher derivatives use the eager FP32 path.
                 leaf = chunk.detach().requires_grad_(True)
-                penalty = r1_penalty(self.D(leaf), leaf)
+                penalty = r1_penalty(
+                    self.D(leaf, conv_backend=cfg.regularizer_conv), leaf
+                )
                 loss = penalty * (0.5 * cfg.r1_gamma * cfg.r1_interval / len(chunks))
                 self.d_scaler.scale(loss).backward()
                 logs["r1"] += penalty.detach() / len(chunks)
             self.finish_phase(self.d_opt, self.d_scaler, self.D.parameters())
 
+        phase("g_main")
         self.D.requires_grad_(False)
         self.G.requires_grad_(True)
         self.d_opt.zero_grad(set_to_none=True)
@@ -283,13 +316,16 @@ class Trainer:
             self.G.mapping.w_avg.lerp_(average_(w_mean), 1 - cfg.w_avg_beta)
 
         if do_pl:
+            phase("pl")
             self.g_opt.zero_grad(set_to_none=True)
             # Use the previous target throughout accumulation. Update once from
             # all samples/ranks afterwards, independent of microbatch partition.
             length_mean = torch.zeros((), device=self.device)
             for _ in chunks:
                 ws, _ = self.styles(micro // cfg.pl_batch_shrink, mix=False)
-                images = self.G.synthesis(ws, "random")
+                images = self.G.synthesis(
+                    ws, "random", conv_backend=cfg.regularizer_conv
+                )
                 lengths = path_lengths(images, ws)
                 penalty = (lengths - self.pl_mean.detach()).square().mean()
                 self.g_scaler.scale(
@@ -301,6 +337,7 @@ class Trainer:
             with torch.no_grad():
                 self.pl_mean.lerp_(average_(length_mean), cfg.pl_decay)
 
+        phase("ema")
         self.steps += 1
         batch_global = n * world_size()
         self.images_seen += batch_global
@@ -315,6 +352,7 @@ class Trainer:
                 target.copy_(source)
         logs["did_r1"] = do_r1
         logs["did_pl"] = do_pl
+        phase(None)
         return logs  # No .item()/synchronisation on the hot path.
 
     def save(self, path, extra=None):
@@ -358,14 +396,35 @@ class Trainer:
         torch.save(payload, temp)
         os.replace(temp, path)
 
-    def load(self, path):
+    def load(self, path, *, allow_execution_changes=False):
+        """Restore state. Optional backend changes preserve optimiser/RNG state
+        but deliberately forfeit bitwise continuation, never objective changes.
+        """
         payload = torch.load(path, map_location="cpu", weights_only=True)
         if payload.get("format_version") != 1:
             raise ValueError("Unsupported checkpoint format")
-        if payload["model_config"] != asdict(self.model_cfg) or payload[
-            "train_config"
-        ] != asdict(self.cfg):
-            raise ValueError("Resume requires identical model/training configuration")
+        # Fill new optional defaults when reading a v0.1 checkpoint. A changed
+        # execution backend still requires an explicit new run, not exact resume.
+        old_model = asdict(ModelConfig(**payload["model_config"]))
+        old_train = asdict(TrainConfig(**payload["train_config"]))
+        changes = {}
+        for section, old, new, permitted in (
+            ("model", old_model, asdict(self.model_cfg), {"modconv", "resample"}),
+            (
+                "training",
+                old_train,
+                asdict(self.cfg),
+                {"regularizer_conv", "compile_main", "tf32", "channels_last"},
+            ),
+        ):
+            for key in new:
+                if old[key] != new[key]:
+                    if not allow_execution_changes or key not in permitted:
+                        raise ValueError(
+                            f"Resume requires identical model/training configuration: {section}.{key} changed. "
+                            "Use a new model_id, or allow_execution_changes for backend-only changes."
+                        )
+                    changes[f"{section}.{key}"] = {"old": old[key], "new": new[key]}
         if len(payload["rng"]) != world_size():
             raise ValueError("Exact resume requires the same world size")
         for name in ("G", "D", "G_ema", "g_opt", "d_opt", "g_scaler", "d_scaler"):
@@ -377,4 +436,5 @@ class Trainer:
         random.setstate(rng["python"])
         if self.device.type == "cuda" and rng["cuda"] is not None:
             torch.cuda.set_rng_state(rng["cuda"], self.device)
+        self.last_load_changes = changes
         return payload["extra"]

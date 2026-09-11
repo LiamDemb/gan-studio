@@ -1,8 +1,8 @@
-numpy==2.5.3
+# Install the CUDA-enabled Torch pair first, as documented in README.md.
+numpy==2.3.5
 pillow==12.3.0
 PyYAML==6.0.3
 ImageHash==4.3.2
 pytest==8.4.2
-torch==2.14.0
-torchvision==0.29.0
-tqdm==4.70.0
+torch==2.8.0
+torchvision==0.23.0

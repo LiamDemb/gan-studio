@@ -3,6 +3,8 @@
 import argparse
 import json
 import math
+import hashlib
+import os
 import platform
 import random
 import time
@@ -15,6 +17,17 @@ import torch
 
 from .models import ModelConfig
 from .training import Trainer, TrainConfig
+from .diagnostics import PhaseTimer, Progress
+
+
+def source_fingerprint():
+    root = Path(__file__).parent
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        digest.update(
+            str(path.relative_to(root)).encode() + b"\0" + path.read_bytes() + b"\0"
+        )
+    return digest.hexdigest()
 
 
 def environment(device):
@@ -32,6 +45,14 @@ def environment(device):
             else None
         ),
         "threads": torch.get_num_threads(),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "precision_environment": {
+            key: os.environ.get(key)
+            for key in ("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", "NVIDIA_TF32_OVERRIDE")
+        },
     }
 
 
@@ -46,7 +67,45 @@ def compiler_graph_count():
         return None
 
 
-def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=None):
+def benchmark(
+    model,
+    training,
+    batch,
+    device="cuda",
+    warmup=16,
+    steps=64,
+    trace=None,
+    phase_timing=True,
+    progress=True,
+    trace_steps=1,
+):
+    with Progress(progress) as status:
+        return _benchmark(
+            model,
+            training,
+            batch,
+            device,
+            warmup,
+            steps,
+            trace,
+            phase_timing,
+            status,
+            trace_steps,
+        )
+
+
+def _benchmark(
+    model,
+    training,
+    batch,
+    device,
+    warmup,
+    steps,
+    trace,
+    phase_timing,
+    status,
+    trace_steps,
+):
     cycle = math.lcm(
         training.r1_interval if training.r1_gamma else 1,
         training.pl_interval if training.pl_weight else 1,
@@ -54,6 +113,19 @@ def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=
     if warmup < cycle or warmup % cycle or steps < cycle or steps % cycle:
         raise ValueError(
             f"warmup and steps must be positive multiples of regularisation cycle ({cycle})"
+        )
+    if trace and not 1 <= trace_steps <= steps:
+        raise ValueError("trace_steps must be between 1 and measured steps")
+    # External overrides can defeat the requested policy. Fail clearly rather
+    # than storing a misleading tf32=false or true result.
+    if (
+        os.environ.get("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE") == "1"
+        and not training.tf32
+        or os.environ.get("NVIDIA_TF32_OVERRIDE") == "0"
+        and training.tf32
+    ):
+        raise ValueError(
+            "TF32 environment override conflicts with requested policy; unset the override"
         )
     torch.manual_seed(42)
     random.seed(42)
@@ -70,39 +142,61 @@ def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=
     )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
     begin = time.perf_counter()
-    for _ in range(warmup):
-        trainer.step(real)
+    for i in range(warmup):
+        status.state = f"warmup {i+1}/{warmup} (first calls may compile/autotune)"
+        trainer.step(
+            real,
+            lambda name: setattr(
+                status, "state", f"warmup {i+1}/{warmup}: {name or 'submitted'}"
+            ),
+        )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+        warmup_allocated = torch.cuda.max_memory_allocated(device)
+        warmup_reserved = torch.cuda.max_memory_reserved(device)
         torch.cuda.reset_peak_memory_stats(device)
+    else:
+        warmup_allocated = warmup_reserved = None
     warmup_seconds = time.perf_counter() - begin
     graphs_before = compiler_graph_count() if training.compile_main else 0
 
     gpu_events, cpu_times, kinds, losses = [], [], [], []
+    phase_timer = PhaseTimer(
+        device,
+        phase_timing,
+        bool(trace),
+        lambda name: setattr(status, "state", f"measured {i+1}/{steps}: {name}"),
+    )
     activities = [torch.profiler.ProfilerActivity.CPU]
     if device.type == "cuda":
         activities.append(torch.profiler.ProfilerActivity.CUDA)
     context = (
         torch.profiler.profile(
-            activities=activities, record_shapes=True, profile_memory=True
+            activities=activities,
+            record_shapes=False,
+            profile_memory=False,
+            schedule=torch.profiler.schedule(
+                wait=steps - trace_steps, warmup=0, active=trace_steps, repeat=1
+            ),
         )
         if trace
         else nullcontext()
     )
     begin = time.perf_counter()
     with context as profiler:
-        for _ in range(steps):
+        for i in range(steps):
             if device.type == "cuda":
                 start_event, end_event = torch.cuda.Event(
                     enable_timing=True
                 ), torch.cuda.Event(enable_timing=True)
-                start_event.record()
+                start_event.record(torch.cuda.current_stream(device))
             t0 = time.perf_counter()
-            result = trainer.step(real)
+            result = trainer.step(real, phase_timer)
             cpu_times.append((time.perf_counter() - t0) * 1000)
             if device.type == "cuda":
-                end_event.record()
+                end_event.record(torch.cuda.current_stream(device))
                 gpu_events.append((start_event, end_event))
             kinds.append((result["did_r1"], result["did_pl"]))
             losses.append(
@@ -110,9 +204,16 @@ def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=
             )
             if trace:
                 profiler.step()
+    status.state = "waiting for queued device work to complete"
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - begin
+    measured_allocated = (
+        torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
+    )
+    measured_reserved = (
+        torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
+    )
     graphs_after = compiler_graph_count() if training.compile_main else 0
     recompiled = (
         None
@@ -132,9 +233,13 @@ def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=
     if trace:
         Path(trace).parent.mkdir(parents=True, exist_ok=True)
         profiler.export_chrome_trace(str(trace))
+    status.state = "completed"
+    if status.enabled:
+        status.report()
     return {
-        "schema": 1,
+        "schema": 2,
         "benchmark": "full-training-cycle-device-resident-synthetic-data",
+        "source_sha256": source_fingerprint(),
         "environment": environment(device),
         "model": asdict(model),
         "training": asdict(training),
@@ -149,12 +254,16 @@ def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=
         "step_median_ms": float(np.median(timings)),
         "step_p95_ms": float(np.percentile(timings, 95)),
         "regularisation_step_classes": phase_classes,
-        "peak_allocated_bytes": (
-            torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
-        ),
-        "peak_reserved_bytes": (
-            torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
-        ),
+        "phase_timings": phase_timer.summary(),
+        "phase_timing_enabled": phase_timing,
+        "progress_enabled": status.enabled,
+        "phase_clock": "cuda-events" if device.type == "cuda" else "host-wall",
+        "peak_allocated_bytes": measured_allocated,
+        "peak_reserved_bytes": measured_reserved,
+        "memory_scope": "peak_* fields cover measured window, warmup separately",
+        "warmup_peak_allocated_bytes": warmup_allocated,
+        "warmup_peak_reserved_bytes": warmup_reserved,
+        "trace_steps": trace_steps if trace else 0,
         "profiled": bool(trace),
         "quality_validated": False,
         "compiler_graphs_during_measurement": (
@@ -162,6 +271,7 @@ def benchmark(model, training, batch, device="cuda", warmup=16, steps=64, trace=
         ),
         "steady_state_valid": not trace and recompiled is False,
         "comparison_to_nvidia": "not measured",
+        "comparison_to_lucidrains": "not measured",
     }
 
 
@@ -179,10 +289,24 @@ def main():
     parser.add_argument(
         "--compile", action=argparse.BooleanOptionalAction, default=None
     )
+    parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--regularizer-conv", choices=["native", "analytic"])
+    parser.add_argument(
+        "--phase-timing", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--progress", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--microbatch", type=int)
     parser.add_argument(
         "--trace",
         help="Optional Chrome trace; profiling distorts the measured throughput",
+    )
+    parser.add_argument(
+        "--trace-steps",
+        type=int,
+        default=1,
+        help="Capture only the final N measured steps",
     )
     args = parser.parse_args()
     torch.set_num_threads(args.threads)
@@ -190,7 +314,7 @@ def main():
     for key in ("modconv", "resample"):
         if getattr(args, key) is not None:
             config["model"][key] = getattr(args, key)
-    for key in ("precision", "microbatch"):
+    for key in ("precision", "microbatch", "tf32", "regularizer_conv"):
         if getattr(args, key) is not None:
             config["training"][key] = getattr(args, key)
     if args.compile is not None:
@@ -203,6 +327,9 @@ def main():
         args.warmup,
         args.steps,
         args.trace,
+        args.phase_timing,
+        args.progress,
+        args.trace_steps,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
