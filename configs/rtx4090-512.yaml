@@ -1,0 +1,46 @@
+project_name: sg2-fast-512
+data:
+    target_size: 512
+    format: png
+    build_id: "001"
+    dedup:
+        exact: true
+        perceptual_threshold: 4
+training:
+    model_id: "model-001"
+    device: cuda
+    batch_size: 32
+    microbatch: 4
+    num_train_steps: 10000
+    num_workers: 4
+    threads: 4
+    loader_timeout: 60
+    seed: 42
+    lr: 0.002
+    precision: bf16
+    channels_last: true
+    compile_main: true
+    tf32: true
+    regularizer_conv: analytic
+    modconv: factorized
+    resample: triton
+    r1_gamma: 10.0
+    r1_interval: 16
+    pl_weight: 2.0
+    pl_interval: 8
+    pl_batch_shrink: 2
+    style_mixing: 0.9
+    mirror: false
+    cache_npy: true
+    log_every: 16
+    save_every: 256
+    progress: true
+generate:
+    catalog_id: "sg2-fast-512-001"
+    catalog_size: 64
+    trunc_psi: 0.7
+    interp_id: "sg2-fast-512-walk"
+    keyframes: [0, 1]
+    frames_per_leg: 48
+    fps: 24
+    video_name: "sg2-fast-512-walk"

@@ -1,4 +1,4 @@
-.PHONY: ingest train generate catalog interpolate video test
+.PHONY: ingest train generate catalog interpolate video test check-stylegan2 benchmark
 
 export PYTHONPATH := src
 
@@ -22,3 +22,10 @@ video:
 
 test:
 	python3 -m pytest tests -q
+
+check-stylegan2:
+	python3 -c 'import torch, triton; assert torch.cuda.is_available(), "CUDA is required: skipped tests are not validation"'
+	python3 -m pytest tests/stylegan2/test_conv_grad.py tests/stylegan2/test_cuda.py -m cuda -q
+
+benchmark:
+	python3 scripts/benchmark_stylegan2.py --config $(CONFIG) --output $(OUTPUT)
